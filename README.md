@@ -12,7 +12,7 @@ Configuration precedence is fixed:
 1. Environment variables
 1. Terminal input
 
-Environment variables use a prefix and `__` for nested fields. Terminal input uses `--path.to.field value` or `--path.to.field=value`.
+Environment variables use a prefix and `__` for nested fields. Terminal input uses `--path.to.field value`, `--path.to.field=value`, or hyphenated forms like `--server-host value`.
 
 Nested field mapping works like this:
 
@@ -22,6 +22,8 @@ Nested field mapping works like this:
 - `--name value` → `config.name`
 - `--server.host value` → `config.server.host`
 - `--server.port=9000` → `config.server.port`
+- `--server-host value` → `config.server.host`
+- `--server-port=9000` → `config.server.port`
 - bare terminal flags like `--debug` are treated as `true`
 
 ```rust
@@ -57,6 +59,12 @@ fn run(config: Option<Config>, _app: AppHandle) -> Result<(), Box<dyn std::error
 ```powershell
 $env:APP_SERVER__PORT=9000
 cargo run --example example-cli -- --name cli-name --server.host 0.0.0.0
+```
+
+Hyphenated terminal flags work too:
+
+```powershell
+cargo run --example example-cli -- --server-host 0.0.0.0 --server-port=9000
 ```
 
 Example input for a nested config:

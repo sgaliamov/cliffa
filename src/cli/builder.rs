@@ -269,12 +269,15 @@ where
 
         if let Some(flag) = parse_cli_flag(arg) {
             if let Some((path, raw)) = flag.split_once('=') {
-                insert_path(&mut root, path, parse_scalar(raw));
+                let path = normalize_cli_path(path);
+                insert_path(&mut root, &path, parse_scalar(raw));
                 pending_path = None;
                 continue;
             }
 
-            if let Some(previous) = pending_path.replace(flag.to_owned()) {
+            let flag = normalize_cli_path(flag);
+
+            if let Some(previous) = pending_path.replace(flag) {
                 insert_path(&mut root, &previous, Value::Bool(true));
             }
 
@@ -313,6 +316,15 @@ fn env_key_to_path(key: &str, prefix: &str) -> Option<String> {
 /// Parses a `--path.to.field` style command-line flag.
 fn parse_cli_flag(value: &str) -> Option<&str> {
     value.strip_prefix("--").filter(|flag| !flag.is_empty())
+}
+
+/// Normalizes terminal input flag names into config paths.
+fn normalize_cli_path(path: &str) -> String {
+    if path.contains('.') {
+        path.to_owned()
+    } else {
+        path.replace('-', ".")
+    }
 }
 
 /// Inserts a value into a nested JSON object path.
@@ -406,7 +418,9 @@ fn parse_scalar(raw: &str) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{cli_args_to_json, deep_merge, env_key_to_path, parse_scalar};
+    use super::{
+        cli_args_to_json, deep_merge, env_key_to_path, normalize_cli_path, parse_scalar,
+    };
     use serde_json::json;
     use std::ffi::OsString;
 
@@ -480,5 +494,29 @@ mod tests {
         assert_eq!(parse_scalar("42"), json!(42));
         assert_eq!(parse_scalar("2.5"), json!(2.5));
         assert_eq!(parse_scalar("hello"), json!("hello"));
+    }
+
+    #[test]
+    fn hyphenated_terminal_flags_map_to_nested_paths() {
+        let value = cli_args_to_json([
+            OsString::from("--server-host"),
+            OsString::from("0.0.0.0"),
+            OsString::from("--server-port=9000"),
+        ]);
+
+        assert_eq!(
+            value,
+            json!({
+                "server": {
+                    "host": "0.0.0.0",
+                    "port": 9000,
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn dotted_terminal_flags_stay_unchanged() {
+        assert_eq!(normalize_cli_path("server.host"), "server.host");
     }
 }
