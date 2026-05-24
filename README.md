@@ -14,6 +14,8 @@ Configuration precedence is fixed:
 
 Environment variables use a prefix and `__` for nested fields. Terminal input uses `--path.to.field value`, `--path.to.field=value`, or hyphenated forms like `--server-host value`.
 
+CLI aliases can map short flags to full config paths. This is useful when nested field paths are too long or when you want stable public flag names.
+
 Nested field mapping works like this:
 
 - `APP_NAME=value` → `config.name`
@@ -47,6 +49,10 @@ struct ServerConfig {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
 	cli::Builder::default()
 		.env_prefix("APP")
+		.with_cli_aliases([
+			("host", "server.host"),
+			("port", "server.port"),
+		])
 		.run(run)
 }
 
@@ -66,6 +72,17 @@ Hyphenated terminal flags work too:
 ```powershell
 cargo run --example example-cli -- --server-host 0.0.0.0 --server-port=9000
 ```
+
+Aliases can target nested fields too:
+
+```powershell
+cargo run --example example-cli -- --host 0.0.0.0 --port=9000
+```
+
+With the aliases above, that maps to:
+
+- `--host` → `config.server.host`
+- `--port` → `config.server.port`
 
 Example input for a nested config:
 

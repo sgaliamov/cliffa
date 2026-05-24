@@ -19,6 +19,7 @@ use tracing_subscriber::{
 /// Builds and runs a CLI application with tracing, config, and signal handling.
 pub struct Builder {
     config_file: Option<PathBuf>,
+    cli_aliases: FxHashMap<String, String>,
     env_prefix: Option<String>,
     level: Level,
     targets: Vec<(String, Level)>,
@@ -33,6 +34,7 @@ impl Default for Builder {
     fn default() -> Self {
         Self {
             config_file: None,
+            cli_aliases: Default::default(),
             env_prefix: None,
             level: Level::INFO,
             targets: Default::default(),
@@ -97,6 +99,33 @@ impl Builder {
     /// Sets the environment variable prefix used for config overrides.
     pub fn env_prefix<S: Into<String>>(mut self, prefix: S) -> Self {
         self.env_prefix = Some(prefix.into());
+        self
+    }
+
+    /// Adds terminal input aliases that map to full config paths.
+    pub fn with_cli_aliases<I, A, P>(mut self, aliases: I) -> Self
+    where
+        I: IntoIterator<Item = (A, P)>,
+        A: Into<String>,
+        P: Into<String>,
+    {
+        self.cli_aliases.extend(aliases.into_iter().map(|(alias, path)| {
+            let alias = normalize_cli_alias(&alias.into());
+            let path = normalize_cli_path(&path.into());
+            (alias, path)
+        }));
+        self
+    }
+
+    /// Adds a single terminal input alias that maps to a full config path.
+    pub fn with_cli_alias<A, P>(mut self, alias: A, path: P) -> Self
+    where
+        A: Into<String>,
+        P: Into<String>,
+    {
+        let alias = normalize_cli_alias(&alias.into());
+        let path = normalize_cli_path(&path.into());
+        self.cli_aliases.insert(alias, path);
         self
     }
 
@@ -171,7 +200,7 @@ impl Builder {
             deep_merge(&mut root, env_to_json(prefix));
         }
 
-        deep_merge(&mut root, cli_args_to_json(env::args_os().skip(1)));
+        deep_merge(&mut root, cli_args_to_json(env::args_os().skip(1), &self.cli_aliases));
 
         if matches!(&root, Value::Object(map) if map.is_empty()) {
             return None;
@@ -251,7 +280,7 @@ fn env_to_json(prefix: &str) -> Value {
 }
 
 /// Converts command-line overrides into a JSON object.
-fn cli_args_to_json<I>(args: I) -> Value
+fn cli_args_to_json<I>(args: I, aliases: &FxHashMap<String, String>) -> Value
 where
     I: IntoIterator<Item = OsString>,
 {
@@ -269,13 +298,13 @@ where
 
         if let Some(flag) = parse_cli_flag(arg) {
             if let Some((path, raw)) = flag.split_once('=') {
-                let path = normalize_cli_path(path);
+                let path = resolve_cli_path(path, aliases);
                 insert_path(&mut root, &path, parse_scalar(raw));
                 pending_path = None;
                 continue;
             }
 
-            let flag = normalize_cli_path(flag);
+            let flag = resolve_cli_path(flag, aliases);
 
             if let Some(previous) = pending_path.replace(flag) {
                 insert_path(&mut root, &previous, Value::Bool(true));
@@ -318,6 +347,11 @@ fn parse_cli_flag(value: &str) -> Option<&str> {
     value.strip_prefix("--").filter(|flag| !flag.is_empty())
 }
 
+/// Normalizes a terminal input alias key for lookup.
+fn normalize_cli_alias(alias: &str) -> String {
+    alias.trim_start_matches('-').replace('.', "-")
+}
+
 /// Normalizes terminal input flag names into config paths.
 fn normalize_cli_path(path: &str) -> String {
     if path.contains('.') {
@@ -325,6 +359,16 @@ fn normalize_cli_path(path: &str) -> String {
     } else {
         path.replace('-', ".")
     }
+}
+
+/// Resolves aliases before applying default CLI path normalization.
+fn resolve_cli_path(path: &str, aliases: &FxHashMap<String, String>) -> String {
+    let alias = normalize_cli_alias(path);
+
+    aliases
+        .get(&alias)
+        .cloned()
+        .unwrap_or_else(|| normalize_cli_path(path))
 }
 
 /// Inserts a value into a nested JSON object path.
@@ -419,21 +463,26 @@ fn parse_scalar(raw: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        cli_args_to_json, deep_merge, env_key_to_path, normalize_cli_path, parse_scalar,
+        cli_args_to_json, deep_merge, env_key_to_path, normalize_cli_alias, normalize_cli_path,
+        parse_scalar, resolve_cli_path,
     };
+    use rustc_hash::FxHashMap;
     use serde_json::json;
     use std::ffi::OsString;
 
     #[test]
     fn cli_args_map_to_nested_json() {
-        let value = cli_args_to_json([
-            OsString::from("--name"),
-            OsString::from("cli-name"),
-            OsString::from("--server.host=0.0.0.0"),
-            OsString::from("--server.port"),
-            OsString::from("9000"),
-            OsString::from("--debug"),
-        ]);
+        let value = cli_args_to_json(
+            [
+                OsString::from("--name"),
+                OsString::from("cli-name"),
+                OsString::from("--server.host=0.0.0.0"),
+                OsString::from("--server.port"),
+                OsString::from("9000"),
+                OsString::from("--debug"),
+            ],
+            &FxHashMap::default(),
+        );
 
         assert_eq!(
             value,
@@ -498,11 +547,14 @@ mod tests {
 
     #[test]
     fn hyphenated_terminal_flags_map_to_nested_paths() {
-        let value = cli_args_to_json([
-            OsString::from("--server-host"),
-            OsString::from("0.0.0.0"),
-            OsString::from("--server-port=9000"),
-        ]);
+        let value = cli_args_to_json(
+            [
+                OsString::from("--server-host"),
+                OsString::from("0.0.0.0"),
+                OsString::from("--server-port=9000"),
+            ],
+            &FxHashMap::default(),
+        );
 
         assert_eq!(
             value,
@@ -518,5 +570,39 @@ mod tests {
     #[test]
     fn dotted_terminal_flags_stay_unchanged() {
         assert_eq!(normalize_cli_path("server.host"), "server.host");
+    }
+
+    #[test]
+    fn aliases_map_short_flags_to_nested_paths() {
+        let aliases = FxHashMap::from_iter([
+            (String::from("host"), String::from("server.host")),
+            (String::from("port"), String::from("server.port")),
+        ]);
+        let value = cli_args_to_json(
+            [
+                OsString::from("--host"),
+                OsString::from("0.0.0.0"),
+                OsString::from("--port=9000"),
+            ],
+            &aliases,
+        );
+
+        assert_eq!(
+            value,
+            json!({
+                "server": {
+                    "host": "0.0.0.0",
+                    "port": 9000,
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn alias_lookup_normalizes_dotted_keys() {
+        let aliases = FxHashMap::from_iter([(String::from("server-host"), String::from("bind.host"))]);
+
+        assert_eq!(normalize_cli_alias("server.host"), "server-host");
+        assert_eq!(resolve_cli_path("server.host", &aliases), "bind.host");
     }
 }
