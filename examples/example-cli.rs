@@ -9,11 +9,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     cli::Builder::default()
         .with_level(Level::INFO)
         .with_targets([("example_cli", Level::DEBUG)])
+        .env_prefix("EXAMPLE")
         .run(run)
 }
 
 // App logic.
-fn run(_config: Option<Config>, app: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+fn run(config: Option<Config>, app: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(config) = config {
+        debug!(
+            name = config.name,
+            start_time = ?config.start_time,
+            end_time = ?config.end_time,
+            path = ?config.path,
+            "Loaded layered config"
+        );
+    }
+
     while app.is_running() {
         debug!("I'm running!");
         sleep(Duration::from_secs(2));
@@ -22,10 +33,9 @@ fn run(_config: Option<Config>, app: AppHandle) -> Result<(), Box<dyn std::error
     Ok(())
 }
 
-// Configuration file and command line arguments.
+// Configuration file, environment variables, and terminal input.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[expect(dead_code)]
 struct Config {
     pub name: String,
     pub start_time: Option<DateTime<Utc>>,
