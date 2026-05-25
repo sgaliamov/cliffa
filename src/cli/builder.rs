@@ -23,10 +23,10 @@ pub struct Builder {
     env_prefix: Option<String>,
     level: Level,
     targets: Vec<(String, Level)>,
-    with_level: bool,
-    with_target: bool,
-    with_thread_ids: bool,
-    without_time: bool,
+    show_level: bool,
+    show_target: bool,
+    show_thread_ids: bool,
+    show_time: bool,
 }
 
 impl Default for Builder {
@@ -38,10 +38,10 @@ impl Default for Builder {
             env_prefix: None,
             level: Level::INFO,
             targets: Default::default(),
-            with_level: true,
-            with_target: true,
-            with_thread_ids: false,
-            without_time: false,
+            show_level: true,
+            show_target: true,
+            show_thread_ids: false,
+            show_time: true,
         }
     }
 }
@@ -68,25 +68,25 @@ impl Builder {
 
     /// Configures whether thread IDs are shown in logs.
     pub fn with_thread_ids(mut self, value: bool) -> Self {
-        self.with_thread_ids = value;
+        self.show_thread_ids = value;
         self
     }
 
     /// Configures whether log levels are shown in logs.
     pub fn show_level(mut self, value: bool) -> Self {
-        self.with_level = value;
+        self.show_level = value;
         self
     }
 
     /// Configures whether log targets are shown in logs.
     pub fn with_target(mut self, value: bool) -> Self {
-        self.with_target = value;
+        self.show_target = value;
         self
     }
 
     /// Configures whether timestamps are shown in logs.
     pub fn with_time(mut self, value: bool) -> Self {
-        self.without_time = !value;
+        self.show_time = value;
         self
     }
 
@@ -174,17 +174,17 @@ impl Builder {
         });
 
         let layer = tracing_subscriber::fmt::layer()
-            .with_level(self.with_level)
-            .with_thread_ids(self.with_thread_ids)
-            .with_target(self.with_target);
+            .with_level(self.show_level)
+            .with_thread_ids(self.show_thread_ids)
+            .with_target(self.show_target);
 
         // tbd: [cliffa] refactor ugliness
-        if self.without_time {
-            let layer = layer.without_time().with_filter(filter);
-            tracing_subscriber::registry().with(layer).try_init()
-        } else {
+        if self.show_time {
             let layer = layer.with_filter(filter);
             // tbd: [cliffa] setup short timer format.
+            tracing_subscriber::registry().with(layer).try_init()
+        } else {
+            let layer = layer.without_time().with_filter(filter);
             tracing_subscriber::registry().with(layer).try_init()
         }
     }
@@ -299,14 +299,14 @@ where
         };
 
         if let Some(flag) = parse_cli_flag(arg) {
-            if let Some((path, raw)) = flag.split_once('=') {
-                let path = resolve_cli_input_path(arg, path, aliases);
+            if let Some((path, raw)) = flag.path.split_once('=') {
+                let path = flag.kind.resolve(path, aliases);
                 insert_path(&mut root, &path, parse_scalar(raw));
                 pending_path = None;
                 continue;
             }
 
-            let flag = resolve_cli_input_path(arg, flag, aliases);
+            let flag = flag.kind.resolve(flag.path, aliases);
 
             if let Some(previous) = pending_path.replace(flag) {
                 insert_path(&mut root, &previous, Value::Bool(true));
@@ -325,6 +325,29 @@ where
     }
 
     root
+}
+
+/// Parsed terminal flag with original prefix kind preserved.
+struct CliFlag<'a> {
+    kind: CliFlagKind,
+    path: &'a str,
+}
+
+/// Prefix kind for terminal flags.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum CliFlagKind {
+    Short,
+    Long,
+}
+
+impl CliFlagKind {
+    /// Resolves a terminal input path according to prefix semantics.
+    fn resolve(self, path: &str, aliases: &FxHashMap<String, String>) -> String {
+        match self {
+            Self::Short => resolve_cli_path(path, aliases),
+            Self::Long => normalize_cli_path(path),
+        }
+    }
 }
 
 /// Normalizes the configured environment prefix.
@@ -348,15 +371,22 @@ fn env_key_to_path(key: &str, prefix: Option<&str>) -> Option<String> {
     Some(remainder.to_ascii_lowercase().replace("__", "."))
 }
 
-/// Parses a `--path.to.field` style command-line flag.
-fn parse_cli_flag(value: &str) -> Option<&str> {
+/// Parses `-alias` and `--path.to.field` style command-line flags.
+fn parse_cli_flag(value: &str) -> Option<CliFlag<'_>> {
     if let Some(flag) = value.strip_prefix("--") {
-        return (!flag.is_empty()).then_some(flag);
+        return (!flag.is_empty()).then_some(CliFlag {
+            kind: CliFlagKind::Long,
+            path: flag,
+        });
     }
 
     value
         .strip_prefix('-')
         .filter(|flag| !flag.is_empty() && !flag.starts_with('-'))
+        .map(|path| CliFlag {
+            kind: CliFlagKind::Short,
+            path,
+        })
 }
 
 /// Normalizes a terminal input alias key for lookup.
@@ -381,19 +411,6 @@ fn resolve_cli_path(path: &str, aliases: &FxHashMap<String, String>) -> String {
         .get(&alias)
         .cloned()
         .unwrap_or_else(|| normalize_cli_path(path))
-}
-
-/// Resolves terminal input path based on original flag style.
-fn resolve_cli_input_path(arg: &str, path: &str, aliases: &FxHashMap<String, String>) -> String {
-    if arg.starts_with("--") {
-        return normalize_cli_path(path);
-    }
-
-    if aliases.contains_key(path) {
-        return resolve_cli_path(path, aliases);
-    }
-
-    normalize_cli_path(path)
 }
 
 /// Inserts a value into a nested JSON object path.
@@ -488,8 +505,8 @@ fn parse_scalar(raw: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        cli_args_to_json, deep_merge, env_key_to_path, normalize_cli_alias, normalize_cli_path,
-        parse_scalar, resolve_cli_input_path, resolve_cli_path,
+        CliFlagKind, cli_args_to_json, deep_merge, env_key_to_path, normalize_cli_alias,
+        normalize_cli_path, parse_scalar, resolve_cli_path,
     };
     use rustc_hash::FxHashMap;
     use serde_json::json;
@@ -658,14 +675,30 @@ mod tests {
     fn double_dash_uses_full_name() {
         let aliases = FxHashMap::from_iter([(String::from("port"), String::from("server.port"))]);
 
-        assert_eq!(
-            resolve_cli_input_path("-port", "port", &aliases),
-            "server.port"
-        );
-        assert_eq!(resolve_cli_input_path("--port", "port", &aliases), "port");
+        assert_eq!(CliFlagKind::Short.resolve("port", &aliases), "server.port");
+        assert_eq!(CliFlagKind::Long.resolve("port", &aliases), "port");
         assert_eq!(normalize_cli_path("server-port"), "server.port");
         let value = cli_args_to_json([OsString::from("--server-port=9000")], &aliases);
 
         assert_eq!(value, json!({ "server": { "port": 9000 } }));
+    }
+
+    #[test]
+    fn short_and_long_flags_keep_distinct_mapping_rules() {
+        let aliases = FxHashMap::from_iter([(String::from("port"), String::from("server.port"))]);
+        let value = cli_args_to_json(
+            [OsString::from("-port=9000"), OsString::from("--port=7000")],
+            &aliases,
+        );
+
+        assert_eq!(
+            value,
+            json!({
+                "server": {
+                    "port": 9000,
+                },
+                "port": 7000,
+            })
+        );
     }
 }
