@@ -109,11 +109,12 @@ impl Builder {
         A: Into<String>,
         P: Into<String>,
     {
-        self.cli_aliases.extend(aliases.into_iter().map(|(alias, path)| {
-            let alias = normalize_cli_alias(&alias.into());
-            let path = normalize_cli_path(&path.into());
-            (alias, path)
-        }));
+        self.cli_aliases
+            .extend(aliases.into_iter().map(|(alias, path)| {
+                let alias = normalize_cli_alias(&alias.into());
+                let path = normalize_cli_path(&path.into());
+                (alias, path)
+            }));
         self
     }
 
@@ -200,7 +201,10 @@ impl Builder {
             deep_merge(&mut root, env_to_json(prefix));
         }
 
-        deep_merge(&mut root, cli_args_to_json(env::args_os().skip(1), &self.cli_aliases));
+        deep_merge(
+            &mut root,
+            cli_args_to_json(env::args_os().skip(1), &self.cli_aliases),
+        );
 
         if matches!(&root, Value::Object(map) if map.is_empty()) {
             return None;
@@ -600,7 +604,8 @@ mod tests {
 
     #[test]
     fn alias_lookup_normalizes_dotted_keys() {
-        let aliases = FxHashMap::from_iter([(String::from("server-host"), String::from("bind.host"))]);
+        let aliases =
+            FxHashMap::from_iter([(String::from("server-host"), String::from("bind.host"))]);
 
         assert_eq!(normalize_cli_alias("server.host"), "server-host");
         assert_eq!(resolve_cli_path("server.host", &aliases), "bind.host");
