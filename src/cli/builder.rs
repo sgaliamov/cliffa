@@ -300,13 +300,13 @@ where
 
         if let Some(flag) = parse_cli_flag(arg) {
             if let Some((path, raw)) = flag.split_once('=') {
-                let path = resolve_cli_path(path, aliases);
+                let path = resolve_cli_input_path(arg, path, aliases);
                 insert_path(&mut root, &path, parse_scalar(raw));
                 pending_path = None;
                 continue;
             }
 
-            let flag = resolve_cli_path(flag, aliases);
+            let flag = resolve_cli_input_path(arg, flag, aliases);
 
             if let Some(previous) = pending_path.replace(flag) {
                 insert_path(&mut root, &previous, Value::Bool(true));
@@ -350,7 +350,13 @@ fn env_key_to_path(key: &str, prefix: Option<&str>) -> Option<String> {
 
 /// Parses a `--path.to.field` style command-line flag.
 fn parse_cli_flag(value: &str) -> Option<&str> {
-    value.strip_prefix("--").filter(|flag| !flag.is_empty())
+    if let Some(flag) = value.strip_prefix("--") {
+        return (!flag.is_empty()).then_some(flag);
+    }
+
+    value
+        .strip_prefix('-')
+        .filter(|flag| !flag.is_empty() && !flag.starts_with('-'))
 }
 
 /// Normalizes a terminal input alias key for lookup.
@@ -375,6 +381,19 @@ fn resolve_cli_path(path: &str, aliases: &FxHashMap<String, String>) -> String {
         .get(&alias)
         .cloned()
         .unwrap_or_else(|| normalize_cli_path(path))
+}
+
+/// Resolves terminal input path based on original flag style.
+fn resolve_cli_input_path(arg: &str, path: &str, aliases: &FxHashMap<String, String>) -> String {
+    if arg.starts_with("--") {
+        return normalize_cli_path(path);
+    }
+
+    if aliases.contains_key(path) {
+        return resolve_cli_path(path, aliases);
+    }
+
+    normalize_cli_path(path)
 }
 
 /// Inserts a value into a nested JSON object path.
@@ -470,7 +489,7 @@ fn parse_scalar(raw: &str) -> Value {
 mod tests {
     use super::{
         cli_args_to_json, deep_merge, env_key_to_path, normalize_cli_alias, normalize_cli_path,
-        parse_scalar, resolve_cli_path,
+        parse_scalar, resolve_cli_input_path, resolve_cli_path,
     };
     use rustc_hash::FxHashMap;
     use serde_json::json;
@@ -600,9 +619,9 @@ mod tests {
         ]);
         let value = cli_args_to_json(
             [
-                OsString::from("--host"),
+                OsString::from("-host"),
                 OsString::from("0.0.0.0"),
-                OsString::from("--port=9000"),
+                OsString::from("-port=9000"),
             ],
             &aliases,
         );
@@ -625,5 +644,28 @@ mod tests {
 
         assert_eq!(normalize_cli_alias("server.host"), "server-host");
         assert_eq!(resolve_cli_path("server.host", &aliases), "bind.host");
+    }
+
+    #[test]
+    fn single_dash_uses_aliases() {
+        let aliases = FxHashMap::from_iter([(String::from("p"), String::from("server.port"))]);
+        let value = cli_args_to_json([OsString::from("-p=9000")], &aliases);
+
+        assert_eq!(value, json!({ "server": { "port": 9000 } }));
+    }
+
+    #[test]
+    fn double_dash_uses_full_name() {
+        let aliases = FxHashMap::from_iter([(String::from("port"), String::from("server.port"))]);
+
+        assert_eq!(
+            resolve_cli_input_path("-port", "port", &aliases),
+            "server.port"
+        );
+        assert_eq!(resolve_cli_input_path("--port", "port", &aliases), "port");
+        assert_eq!(normalize_cli_path("server-port"), "server.port");
+        let value = cli_args_to_json([OsString::from("--server-port=9000")], &aliases);
+
+        assert_eq!(value, json!({ "server": { "port": 9000 } }));
     }
 }
