@@ -197,9 +197,7 @@ impl Builder {
             deep_merge(&mut root, file_config);
         }
 
-        if let Some(prefix) = self.env_prefix.as_deref() {
-            deep_merge(&mut root, env_to_json(prefix));
-        }
+        deep_merge(&mut root, env_to_json(self.env_prefix.as_deref()));
 
         deep_merge(
             &mut root,
@@ -268,12 +266,12 @@ fn load_json_value(path: &Path) -> Option<Value> {
 }
 
 /// Converts matching environment variables into a JSON object.
-fn env_to_json(prefix: &str) -> Value {
-    let normalized_prefix = normalize_env_prefix(prefix);
+fn env_to_json(prefix: Option<&str>) -> Value {
+    let normalized_prefix = prefix.map(normalize_env_prefix);
     let mut root = Value::Object(Map::new());
 
     for (key, raw) in env::vars() {
-        let Some(path) = env_key_to_path(&key, &normalized_prefix) else {
+        let Some(path) = env_key_to_path(&key, normalized_prefix.as_deref()) else {
             continue;
         };
 
@@ -335,9 +333,13 @@ fn normalize_env_prefix(prefix: &str) -> String {
 }
 
 /// Maps an environment variable name to a config path.
-fn env_key_to_path(key: &str, prefix: &str) -> Option<String> {
+fn env_key_to_path(key: &str, prefix: Option<&str>) -> Option<String> {
     let normalized_key = key.to_ascii_uppercase();
-    let remainder = normalized_key.strip_prefix(prefix)?.strip_prefix('_')?;
+
+    let remainder = match prefix {
+        Some(prefix) => normalized_key.strip_prefix(prefix)?.strip_prefix('_')?,
+        None => key,
+    };
 
     if remainder.is_empty() {
         return None;
@@ -503,9 +505,23 @@ mod tests {
 
     #[test]
     fn env_keys_map_to_nested_paths() {
-        let path = env_key_to_path("APP_SERVER__PORT", "APP");
+        let path = env_key_to_path("APP_SERVER__PORT", Some("APP"));
 
         assert_eq!(path.as_deref(), Some("server.port"));
+    }
+
+    #[test]
+    fn env_keys_without_prefix_map_to_nested_paths() {
+        let path = env_key_to_path("server__port", None);
+
+        assert_eq!(path.as_deref(), Some("server.port"));
+    }
+
+    #[test]
+    fn env_keys_without_prefix_keep_single_underscores() {
+        let path = env_key_to_path("rayon_num_threads", None);
+
+        assert_eq!(path.as_deref(), Some("rayon_num_threads"));
     }
 
     #[test]
