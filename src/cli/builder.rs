@@ -208,8 +208,17 @@ impl Builder {
             return None;
         }
 
-        match serde_json::from_value(root) {
-            Ok(config) => Some(config),
+        let mut unknown_paths = Vec::new();
+
+        match serde_ignored::deserialize(root, |path| {
+            unknown_paths.push(path.to_string());
+        }) {
+            Ok(config) => {
+                for path in &unknown_paths {
+                    warn!("Unknown config path: {path}");
+                }
+                Some(config)
+            }
             Err(error) => {
                 warn!("Failed to deserialize merged config: {error}");
                 None
