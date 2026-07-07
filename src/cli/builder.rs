@@ -5,7 +5,7 @@ use serde_json::{Map, Number, Value};
 use std::{
     env,
     ffi::OsString,
-    fs::File,
+    fs,
     path::{Path, PathBuf},
 };
 use tracing::{Level, debug, trace, warn};
@@ -226,28 +226,39 @@ impl Builder {
         }
     }
 
-    /// Loads the base JSON config file.
+    /// Loads the base config file (JSON or YAML).
     fn load_file_config(&self) -> Option<Value> {
         if let Some(ref file) = self.config_file {
-            return load_json_value(file);
+            return load_config_value(file);
         }
 
-        let mut current = env::current_exe().ok()?;
-        current.set_extension("json");
-        let file_name = current.file_name()?;
+        let exe = env::current_exe().ok()?;
+        let stem = exe.file_stem()?;
+
+        let candidates = CONFIG_EXTENSIONS
+            .iter()
+            .map(|ext| {
+                let mut name = stem.to_owned();
+                name.push(".");
+                name.push(ext);
+                name
+            })
+            .collect::<Vec<_>>();
 
         // tbd: [cliffa] merge multiple configs from all paths on top.
         // tbd: [cliffa] use environment name to select correct config file.
-        current
-            .ancestors()
+        exe.ancestors()
             .skip(1)
-            .map(|dir| dir.join(file_name))
-            .find_map(|path| load_json_value(&path))
+            .flat_map(|dir| candidates.iter().map(move |name| dir.join(name)))
+            .find_map(|path| load_config_value(&path))
     }
 }
 
-/// Loads a JSON document from disk.
-fn load_json_value(path: &Path) -> Option<Value> {
+/// Config file extensions probed during auto-discovery, in precedence order.
+const CONFIG_EXTENSIONS: [&str; 3] = ["json", "yaml", "yml"];
+
+/// Loads a JSON or YAML config document from disk.
+fn load_config_value(path: &Path) -> Option<Value> {
     trace!("Looking for a config file from {}...", path.display());
 
     if !path.exists() {
@@ -256,21 +267,38 @@ fn load_json_value(path: &Path) -> Option<Value> {
 
     debug!("Loading a config file from {}...", path.display());
 
-    match File::open(path) {
-        Ok(file) => match serde_json::from_reader::<_, Value>(file) {
-            Ok(value) => {
-                trace!("Loaded config from {}", path.display());
-                Some(value)
-            }
-            Err(error) => {
-                warn!("Failed to parse config from {}: {error}", path.display());
-                None
-            }
-        },
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
         Err(error) => {
             warn!("Failed to open config file {}: {error}", path.display());
+            return None;
+        }
+    };
+
+    let extension = path.extension().and_then(|ext| ext.to_str());
+
+    match parse_config(extension, &text) {
+        Ok(value) => {
+            trace!("Loaded config from {}", path.display());
+            Some(value)
+        }
+        Err(error) => {
+            warn!("Failed to parse config from {}: {error}", path.display());
             None
         }
+    }
+}
+
+/// Parses config text by extension: `yaml`/`yml` as YAML, anything else as JSON.
+fn parse_config(extension: Option<&str>, text: &str) -> Result<Value, Box<dyn std::error::Error>> {
+    let is_yaml = extension
+        .map(|ext| ext.eq_ignore_ascii_case("yaml") || ext.eq_ignore_ascii_case("yml"))
+        .unwrap_or(false);
+
+    if is_yaml {
+        Ok(serde_yaml_ng::from_str(text)?)
+    } else {
+        Ok(serde_json::from_str(text)?)
     }
 }
 
@@ -515,7 +543,7 @@ fn parse_scalar(raw: &str) -> Value {
 mod tests {
     use super::{
         CliFlagKind, cli_args_to_json, deep_merge, env_key_to_path, normalize_cli_alias,
-        normalize_cli_path, parse_scalar, resolve_cli_path,
+        normalize_cli_path, parse_config, parse_scalar, resolve_cli_path,
     };
     use rustc_hash::FxHashMap;
     use serde_json::json;
@@ -709,5 +737,49 @@ mod tests {
                 "port": 7000,
             })
         );
+    }
+
+    #[test]
+    fn yaml_and_json_parse_to_equal_values() {
+        let json = r#"{
+            "name": "app",
+            "server": { "host": "0.0.0.0", "port": 9000 },
+            "tags": ["a", "b"],
+            "debug": true
+        }"#;
+        let yaml = "
+# comment survives
+name: app
+server:
+  host: 0.0.0.0
+  port: 9000
+tags: [a, b]
+debug: true
+";
+
+        assert_eq!(
+            parse_config(Some("json"), json).unwrap(),
+            parse_config(Some("yaml"), yaml).unwrap(),
+        );
+    }
+
+    #[test]
+    fn parse_dispatches_by_extension() {
+        let yaml = "port: 9000";
+        let json = r#"{"port": 9000}"#;
+        let expected = json!({ "port": 9000 });
+
+        assert_eq!(parse_config(Some("yml"), yaml).unwrap(), expected);
+        assert_eq!(parse_config(Some("YAML"), yaml).unwrap(), expected);
+        assert_eq!(parse_config(Some("json"), json).unwrap(), expected);
+        // Unknown or missing extension falls back to JSON.
+        assert_eq!(parse_config(Some("conf"), json).unwrap(), expected);
+        assert_eq!(parse_config(None, json).unwrap(), expected);
+    }
+
+    #[test]
+    fn malformed_documents_fail_to_parse() {
+        assert!(parse_config(Some("yaml"), "key: [unclosed").is_err());
+        assert!(parse_config(Some("json"), "{ not json").is_err());
     }
 }

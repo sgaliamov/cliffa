@@ -3,14 +3,16 @@
 Mini CLI framework.
 
 1. Parses the command line arguments.
-1. Loads configuration from JSON files, environment variables, and terminal input.
+1. Loads configuration from JSON or YAML files, environment variables, and terminal input.
 1. Handles CTRL-C and termination signals.
 
 Configuration precedence is fixed:
 
-1. JSON file
+1. Config file (JSON or YAML)
 1. Environment variables
 1. Terminal input
+
+Config file auto-discovery walks up from the executable directory; in each directory it probes `<exe>.json`, `<exe>.yaml`, `<exe>.yml` in that order (JSON wins when both exist). An explicit `config_file` path is parsed by extension, defaulting to JSON.
 
 Environment variables use a prefix and `__` for nested fields. Terminal input uses `--path.to.field value`, `--path.to.field=value`, or hyphenated forms like `--server-host value`.
 
